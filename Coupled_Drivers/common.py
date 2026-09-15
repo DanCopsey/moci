@@ -45,6 +45,8 @@ class ModNamelist(object):
         '''
         self.filename = filename
         self.replace_vars = {}
+        self.replace_vars_conditional = {}
+        self.delete_vars = {}
 
     def var_val(self, variable, value):
         '''
@@ -53,15 +55,71 @@ class ModNamelist(object):
         will be ignored
         '''
         if isinstance(value, str):
-            if value.lower() not in ('.true.', '.false.'):
+            if '.true.' in value.lower() or '.false.' in value.lower() or value[0] == '"' or value[0] == "'":
+                # In some cases we do not want to add quotes either side of strings:
+                #    - If the input is a boolean (or list of booleans)
+                #    - If the input has a double quote or single quote as the first character (i.e. a string within a string)
+                pass
+            else:
+                # For all other strings then put quotes either side
                 value = '\'%s\'' % value
 
         self.replace_vars[variable] = value
+
+    def var_val_conditional(self, variable, conditions, default=None):
+        '''
+        Variable name - value pairs to be updated, but ONLY conditional
+        upon the existing value being equal toor containing the prescribed
+        condition.
+        '''
+        for i_condition in range(len(conditions)):
+            test_value = conditions[i_condition][-1]
+            if isinstance(test_value, str):
+                if test_value.lower() not in ('.true.', '.false.'):
+                    conditions[i_condition][-1] = '\'%s\'' % test_value
+
+        self.replace_vars_conditional[variable] = (conditions, default)
+
+    def var_delete(self, variable):
+        '''
+        Add to a dictionary of variable names to be deleted. Note that this relies on
+        the key existing in the dictionary and the contents doesn't matter so we just
+        set it to True.
+        '''
+        self.delete_vars[variable] = True
+
+    def check_no_duplicates(self):
+        '''
+        Check there are no variables duplicated between the conditional
+        and non conditional namelists
+        '''
+        set_non_conditional = set(self.replace_vars)
+        set_conditional = set(self.replace_vars_conditional)
+        duplicates = set_non_conditional.intersection(set_conditional)
+        if duplicates:
+            sys.stderr.write('There are the following duplicates in the non'
+                             ' conditional and conditional edits\n')
+            for duplicate in duplicates:
+                sys.stderr.write('  {}\n'.format(duplicate))
+            sys.exit()
+
+    def replace_conditional(self, variable_name, variable_value):
+        '''
+        Docstring
+        '''
+        conditions, default_val \
+            = self.replace_vars_conditional[variable_name]
+        default_val
+        for condition in conditions:
+            if condition[0](variable_value):
+                return condition[1]
+        return default_val
 
     def replace(self):
         '''
         Do the update
         '''
+        self.check_no_duplicates()
         output_file = open_text_file(self.filename+'out', 'w')
         input_file = open_text_file(self.filename, 'r')
         for line in input_file.readlines():
@@ -72,6 +130,19 @@ class ModNamelist(object):
                 output_file.write('%s=%s,\n' %
                                   (variable_name,
                                    self.replace_vars[variable_name]))
+            elif variable_name in list(self.replace_vars_conditional.keys()):
+                variable_value = re.findall(r'.*=\s*(\S+)\s*', line)
+                if variable_value:
+                    variable_value = variable_value[0]
+                replacement_value = self.replace_conditional(variable_name,
+                                                             variable_value)
+                if replacement_value:
+                    output_file.write('%s=%s,\n' %
+                                      (variable_name, replacement_value))
+                else:
+                    output_file.write(line)
+            elif variable_name in list(self.delete_vars.keys()):
+                pass
             else:
                 output_file.write(line)
         input_file.close()
