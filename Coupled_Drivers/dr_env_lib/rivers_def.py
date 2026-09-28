@@ -18,14 +18,22 @@ DESCRIPTION
     Definition of the environment variables required for a rivers model
     run
 '''
+
 RIVERS_ENVIRONMENT_VARS_INITIAL = {
     'RIVER_EXEC': {},
     'RIVER_LINK': {'default_val': 'river.exe'},
+    'RIVER_RUNID': {'default_val':''},
+    'PRINT_STATUS': {'default_val': 'PrStatus_Normal'},
     'MODEL_NLIST': {'default_val': 'model_grid.nml'},
     'OUTPUT_NLIST': {'default_val': 'output.nml'},
     'TIME_NLIST': {'default_val': 'timesteps.nml'},
     'COUPLE_NLIST': {'default_val': 'rivers_coupling.nml'},
-    'RIVER_NPROC': {},
-    'ROSE_LAUNCHER_PREOPTS_RIVER': {},
+    'RIV_INIT_NLIST': {'default_val': 'initial_conditions.nml'},
+    'ANCILLARIES': {'default_val': 'ancillaries.nml'},
+    'RIVER_DATA': {'default_val':'./river_output'},
+    'RIVER_NPROC': {'description': 'Number of processors used for rivers'},
+    'ROSE_LAUNCHER_PREOPTS_RIVER': {'default_val': '-n 1'},
     'RIVER_START': {'default_val': 'unset'},
 }
+
+RIVERS_ENVIRONMENT_VARS_FINAL = {}

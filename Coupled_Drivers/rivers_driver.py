@@ -24,6 +24,7 @@ import re
 import pathlib
 import common
 import error
+import time
 import dr_env_lib.rivers_def
 import dr_env_lib.env_lib
 
@@ -31,6 +32,18 @@ try:
     import f90nml
 except ImportError:
     pass
+
+
+def _load_environment_variables(river_envar):
+    '''
+    Load the river environment variables required for the model run into the
+    river_envar container
+    '''
+    # Load the river namelist environment variable
+    river_envar = dr_env_lib.env_lib.load_envar_from_definition(
+        river_envar, dr_env_lib.rivers_def.RIVERS_ENVIRONMENT_VARS_INITIAL)
+
+    return river_envar
 
 
 def _setup_dates(common_envar):
@@ -68,7 +81,8 @@ def _setup_dates(common_envar):
 
     return run_start.strip(), run_end.strip()
 
-def _update_river_nl(river_envar, run_start, run_end):
+
+def _update_river_nl(common_envar, river_envar, run_start, run_end):
     '''
     Check that the JULES river namelist files exist, update
     the start and end dates, and create the output directory
@@ -76,6 +90,8 @@ def _update_river_nl(river_envar, run_start, run_end):
     # Check that the namelist files exist
     output_nl = river_envar['OUTPUT_NLIST']
     time_nl = river_envar['TIME_NLIST']
+    riv_init_nl = river_envar['RIV_INIT_NLIST']
+    ancillaries_nl = river_envar['ANCILLARIES']
 
     if not os.path.isfile(output_nl):
         sys.stderr.write('[FAIL] Can not find the river namelist file %s\n' %
@@ -86,16 +102,96 @@ def _update_river_nl(river_envar, run_start, run_end):
                          time_nl)
         sys.exit(error.MISSING_DRIVER_FILE_ERROR)
 
-    # Update the start and end dates
-    mod_outputnl = common.ModNamelist(output_nl)
-    mod_outputnl.var_val('output_start', run_start)
-    mod_outputnl.var_val('output_end', run_end)
-    mod_outputnl.replace()
+    # If the run ID has been overridden for the rivers code, the use
+    # that value. Otherwise use the standard RUNID.
+    if river_envar['RIVER_RUNID'] == '':
+       run_id = common_envar['RUNID']+'r'
+    else:
+       run_id = river_envar['RIVER_RUNID']+'r'
 
+    # We need to ensure the date is included in all
+    # "profile_name" entries
     mod_timenl = common.ModNamelist(time_nl)
     mod_timenl.var_val('main_run_start', run_start)
     mod_timenl.var_val('main_run_end', run_end)
     mod_timenl.replace()
+
+    # We don't want to initialise river storage from ancillary file for a CRUN
+    # This means reducing nvars by one and shrinking all associated lists by one
+    if common_envar['CONTINUE'] == 'true':
+        mod_ancilsnl = common.ModNamelist(ancillaries_nl)
+        mod_ancilsnl.var_val('nvars', 3)
+        mod_ancilsnl.var_val('use_file', '.true.,.true.,.true.')
+        mod_ancilsnl.var_val('var', "'direction','sequence','rivers_outflow_number'")
+        mod_ancilsnl.var_val('var_name', "'river_routing_direction','river_routing_sequence','river_number'")
+        mod_ancilsnl.var_val('is_climatology', '.false.,.false.,.false.')
+        mod_ancilsnl.var_delete('const_val')
+        mod_ancilsnl.replace()
+
+    # River dumps have their own peculiar naming convention.
+    # The .0. part is a temporary solution pending clarification of whether
+    # JULES can be made to use YYYYMMDDhhmmss in the dump name. It assumes
+    # all dumps start from midnight which is not a good thing to assume
+    start_yyyymmdd = str(run_start[:4]) + str(run_start[5:7]) + str(run_start[8:10])
+    end_yyyymmdd = str(run_end[:4]) + str(run_end[5:7]) + str(run_end[8:10])
+    latest_river_dump = river_envar['RIVER_DATA'] + '/' + run_id + '.dump.' + \
+                        start_yyyymmdd + '.0.nc'
+
+    if common_envar['CONTINUE'] == 'false':
+       # This is a new run so we just stick with whatever dump or
+       # other initialisation method is provided in the namelists
+       sys.stdout.write('[INFO] River running from existing restart data or ancil\n')
+
+       # If we have an old river history data directory from a previous run
+       # then rename it.
+       direc = river_envar['RIVER_DATA']
+       if os.path.isdir(direc) and (direc not in ('./', '.')):
+          sys.stdout.write('[INFO] directory is %s\n' % direc)
+          sys.stdout.write('[INFO] This is a New Run. Renaming old RIVER'
+                           ' history directory\n')
+          os.rename(direc, '%s.%s' % (direc, time.strftime("%Y%m%d%H%M")))
+          os.makedirs(direc)
+
+    elif os.path.isfile(latest_river_dump):
+       # This is a CRUN so we update the namelist to point at the most
+       # recent restart file.
+       mod_rivinitnl = common.ModNamelist(riv_init_nl)
+
+       mod_rivinitnl.var_val('file',latest_river_dump)
+
+       # Ensure we're set to use a restart file
+       l_restart='.true.'
+       mod_rivinitnl.var_val('dump_file', l_restart)
+
+       # Set the number of initialised variables to zero so that it loads all the variables from the dump
+       mod_rivinitnl.var_val('nvars', 0)
+
+       mod_rivinitnl.replace()
+    else:
+        sys.stderr.write('[FAIL] No restart data available for rivers in '
+                         ':\n  %s\n' % latest_river_dump)
+        sys.exit(error.MISSING_MODEL_FILE_ERROR)
+
+    # Set up specific filename details for any expected diagnostic files.
+    filestub_drive_rivers='drive_rivers-only.' + start_yyyymmdd + \
+                                                            '_' + end_yyyymmdd
+    filestub_rivers='rivers.' + start_yyyymmdd + '_' + end_yyyymmdd
+
+    mod_outputnl = common.ModNamelist(output_nl)
+
+    # Update the start and end dates
+    mod_outputnl.var_val('output_start', run_start)
+    mod_outputnl.var_val('output_end', run_end)
+
+    # Update the run id
+    mod_outputnl.var_val('run_id', run_id)
+
+    # Update the output diagnostic file names
+    mod_outputnl.var_val_conditional(
+           'profile_name', [[lambda x: 'drive_rivers' in x, filestub_drive_rivers],
+                            [lambda x: 'rivers' in x and 'drive' not in x, filestub_rivers]])
+
+    mod_outputnl.replace()
 
     # Create the output directory, do not rely on f90nml
     rcode, val = common.exec_subproc(['grep', 'output_dir', output_nl])
@@ -115,10 +211,9 @@ def _setup_executable(common_envar):
     # Create the environment variable container
     river_envar = dr_env_lib.env_lib.LoadEnvar()
     # Load the environment variables required
-    river_envar = dr_env_lib.env_lib.load_envar_from_definition(
-        river_envar, dr_env_lib.rivers_def.RIVERS_ENVIRONMENT_VARS_INITIAL)
+    river_envar = _load_environment_variables(river_envar)
 
-    #Link the ocean executable
+    # Link the river executable
     common.remove_file(river_envar['RIVER_LINK'])
     os.symlink(river_envar['RIVER_EXEC'],
                river_envar['RIVER_LINK'])
@@ -127,7 +222,7 @@ def _setup_executable(common_envar):
     run_start, run_end = _setup_dates(common_envar)
 
     # Update the river namelists
-    _update_river_nl(river_envar, run_start, run_end)
+    _update_river_nl(common_envar, river_envar, run_start, run_end)
 
     return river_envar
 
@@ -235,9 +330,9 @@ def _sent_coupling_fields(river_envar, run_info):
 
 def _finalize_executable():
     '''
-    Finalize the JULES river run, copy the nemo namelist to
+    Finalize the JULES river run, copy the river namelists to
     the restart directory for the next cycle, update standard out,
-    and ensure that no errors have been found in the NEMO execution.
+    and ensure that no errors have been found in the river execution.
     '''
     sys.stdout.write('[INFO] finalizing JULES river')
     sys.stdout.write('[INFO] running finalize in %s' % os.getcwd())
